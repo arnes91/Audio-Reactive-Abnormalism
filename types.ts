@@ -10,3 +10,9 @@ export enum AudioSourceType {
   MICROPHONE = 'MICROPHONE',
   FILE = 'FILE'
 }
+
+export interface RecorderSettings {
+  mimeType: string;
+  videoBitsPerSecond: number;
+  fps: number;
+}

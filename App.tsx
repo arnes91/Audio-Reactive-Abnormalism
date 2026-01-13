@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import Visualizer from './components/Visualizer';
 import GlitchText from './components/GlitchText';
-import { AudioData, AudioSourceType } from './types';
-import { Play, Mic, Upload, Square, AlertTriangle, Disc } from 'lucide-react';
+import RecorderPanel from './components/RecorderPanel';
+import { AudioData, AudioSourceType, RecorderSettings } from './types';
+import { Mic, Upload, Square, AlertTriangle, Download } from 'lucide-react';
 
 const INITIAL_AUDIO_DATA: AudioData = {
   bass: 0,
@@ -37,10 +38,24 @@ const App: React.FC = () => {
   const [audioData, setAudioData] = useState<AudioData>(INITIAL_AUDIO_DATA);
   const [isPlaying, setIsPlaying] = useState(false);
   const [sourceType, setSourceType] = useState<AudioSourceType | null>(null);
+  
+  // Audio Nodes
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
+  const [mediaStreamDest, setMediaStreamDest] = useState<MediaStreamAudioDestinationNode | null>(null);
+
+  // Recording State
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<number>();
+
   const [logLines, setLogLines] = useState<string[]>(LYRICS_LOG.slice(0, 3));
+  
+  // Refs
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const rafRef = useRef<number>();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -53,9 +68,7 @@ const App: React.FC = () => {
     analyser.getByteFrequencyData(dataArray);
 
     // Calculate bands (Approximation for standard 1024 FFT size)
-    // Bass: ~20Hz - 200Hz
     const bassEnd = Math.floor(bufferLength * 0.05); 
-    // Mid: ~200Hz - 2kHz
     const midEnd = Math.floor(bufferLength * 0.25);
     
     let bassSum = 0;
@@ -94,15 +107,23 @@ const App: React.FC = () => {
     };
   }, [isPlaying, analyser, updateAudioData]);
 
-  // Init Audio Context
+  // Init Audio Context & Stream Destination (For recording)
   const initAudioContext = () => {
     const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     const anal = ctx.createAnalyser();
-    anal.fftSize = 1024; // Good balance for visuals
-    anal.smoothingTimeConstant = 0.85; // Smooth but reactive
+    const dest = ctx.createMediaStreamDestination(); // For recording mixing
+
+    anal.fftSize = 1024;
+    anal.smoothingTimeConstant = 0.85;
+
+    // We connect nodes slightly differently depending on source, but these are common
+    anal.connect(dest); 
+
     setAudioContext(ctx);
     setAnalyser(anal);
-    return { ctx, anal };
+    setMediaStreamDest(dest);
+
+    return { ctx, anal, dest };
   };
 
   const handleMicInput = async () => {
@@ -111,6 +132,8 @@ const App: React.FC = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const source = ctx.createMediaStreamSource(stream);
       source.connect(anal);
+      // For mic, we usually don't want to hear ourselves (feedback loop), so we don't connect anal -> ctx.destination
+      
       setSourceType(AudioSourceType.MICROPHONE);
       setIsPlaying(true);
     } catch (err) {
@@ -132,7 +155,7 @@ const App: React.FC = () => {
         
         const source = ctx.createMediaElementSource(audioRef.current);
         source.connect(anal);
-        anal.connect(ctx.destination);
+        anal.connect(ctx.destination); // Connect to speakers
         
         audioRef.current.play().then(() => setIsPlaying(true));
         setSourceType(AudioSourceType.FILE);
@@ -145,15 +168,92 @@ const App: React.FC = () => {
         audioRef.current.pause();
         audioRef.current.currentTime = 0;
     }
-    // Note: Mic stream isn't explicitly closed here for simplicity, but stopping analysis stops the visual loop
+    if (isRecording) {
+      stopRecording();
+    }
   };
 
   const addRandomLog = () => {
       const randomLine = LYRICS_LOG[Math.floor(Math.random() * LYRICS_LOG.length)];
       setLogLines(prev => {
           const newLogs = [...prev, `[${new Date().toLocaleTimeString().split(' ')[0]}] ${randomLine}`];
-          return newLogs.slice(-8); // Keep last 8 lines
+          return newLogs.slice(-8); 
       });
+  };
+
+  // Recording Logic
+  const startRecording = (settings: RecorderSettings) => {
+    if (!canvasRef.current || !mediaStreamDest) {
+      alert("System not ready for capture.");
+      return;
+    }
+
+    try {
+      // 1. Capture Video Stream from Canvas
+      const videoStream = canvasRef.current.captureStream(settings.fps);
+      const videoTrack = videoStream.getVideoTracks()[0];
+
+      // 2. Capture Audio Stream from Node
+      const audioTrack = mediaStreamDest.stream.getAudioTracks()[0];
+
+      // 3. Combine
+      const combinedStream = new MediaStream([videoTrack]);
+      if (audioTrack) combinedStream.addTrack(audioTrack);
+
+      // 4. Initialize Recorder
+      const recorder = new MediaRecorder(combinedStream, {
+        mimeType: settings.mimeType,
+        videoBitsPerSecond: settings.videoBitsPerSecond,
+      });
+
+      recordingChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          recordingChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const blob = new Blob(recordingChunksRef.current, { type: settings.mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        const fileExt = settings.mimeType.includes('mp4') ? 'mp4' : 'webm';
+        a.download = `BRZI_ARZI_CAPTURE_${Date.now()}.${fileExt}`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }, 100);
+      };
+
+      recorder.start(100); // Collect 100ms chunks
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+      
+      // Timer
+      const startTime = Date.now();
+      recordingTimerRef.current = window.setInterval(() => {
+        setRecordingTime(Date.now() - startTime);
+      }, 50);
+
+    } catch (e) {
+      console.error("Recording failed", e);
+      alert("Could not start recording. Browser compatibility issue?");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+    }
+    setIsRecording(false);
+    setRecordingTime(0);
   };
 
   return (
@@ -162,16 +262,24 @@ const App: React.FC = () => {
       <audio ref={audioRef} loop crossOrigin="anonymous" className="hidden" />
 
       {/* 3D Visualizer Background */}
-      <Visualizer audioData={audioData} isPlaying={isPlaying} />
+      <Visualizer ref={canvasRef} audioData={audioData} isPlaying={isPlaying} />
 
-      {/* Scanline Overlay */}
+      {/* Scanline Overlay (Not recorded) */}
       <div className="absolute inset-0 z-10 pointer-events-none scanline opacity-30"></div>
       
-      {/* Vignette */}
+      {/* Vignette (Not recorded) */}
       <div className="absolute inset-0 z-10 pointer-events-none bg-[radial-gradient(circle,transparent_60%,rgba(0,0,0,0.9)_100%)]"></div>
 
+      {/* Recording Overlay UI - Only visible when NOT recording or specifically designed to NOT obstruct visuals too much */}
+      <RecorderPanel 
+        isRecording={isRecording}
+        onStartRecording={startRecording}
+        onStopRecording={stopRecording}
+        recordingTime={recordingTime}
+      />
+
       {/* UI Overlay */}
-      <div className="absolute inset-0 z-20 flex flex-col justify-between p-8 pointer-events-none">
+      <div className={`absolute inset-0 z-20 flex flex-col justify-between p-8 pointer-events-none transition-opacity duration-300 ${isRecording ? 'opacity-40' : 'opacity-100'}`}>
         
         {/* Header */}
         <div className="flex justify-between items-start">
@@ -184,7 +292,7 @@ const App: React.FC = () => {
             <div className="text-right hidden md:block">
                 <div className="text-xs text-green-600">FPS: 60.0</div>
                 <div className="text-xs text-green-600">DSP: ACTIVE</div>
-                <div className="text-xs text-green-600">BPM: DETECTING...</div>
+                {isRecording && <div className="text-xs text-red-500 font-bold animate-pulse">OUTPUT: WRITING...</div>}
             </div>
         </div>
 
@@ -224,7 +332,9 @@ const App: React.FC = () => {
 
         {/* Playback Controls (Bottom Right) */}
         {isPlaying && (
-             <div className="absolute bottom-8 right-8 pointer-events-auto flex gap-4">
+             <div className="absolute bottom-8 right-8 pointer-events-auto flex flex-col gap-4 items-end">
+                {/* Recorder Panel Button injects itself via fixed positioning in RecorderPanel.tsx */}
+                
                 <button 
                     onClick={stopAudio}
                     className="p-4 border border-red-500 bg-black hover:bg-red-900/20 text-red-500 rounded-full transition-all hover:scale-110 active:scale-95"
@@ -256,7 +366,7 @@ const App: React.FC = () => {
         style={{ opacity: audioData.bass > 200 ? 0.3 : 0 }}
       ></div>
       
-      {/* Heavy Glitch Overlay on Drop (High volume + high bass) */}
+      {/* Heavy Glitch Overlay on Drop */}
       {audioData.volume > 200 && audioData.bass > 220 && (
           <div className="absolute inset-0 pointer-events-none z-40 flex items-center justify-center">
               <h1 className="text-9xl font-black text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-blue-500 animate-pulse tracking-tighter mix-blend-difference transform scale-150">

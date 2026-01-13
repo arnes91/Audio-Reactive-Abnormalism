@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useMemo } from 'react';
+import React, { useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import * as THREE from 'three';
 import { vertexShader, fragmentShader } from '../shaders';
 import { AudioData } from '../types';
@@ -8,8 +8,9 @@ interface VisualizerProps {
   isPlaying: boolean;
 }
 
-const Visualizer: React.FC<VisualizerProps> = ({ audioData, isPlaying }) => {
+const Visualizer = forwardRef<HTMLCanvasElement, VisualizerProps>(({ audioData, isPlaying }, ref) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.OrthographicCamera | null>(null);
@@ -17,9 +18,12 @@ const Visualizer: React.FC<VisualizerProps> = ({ audioData, isPlaying }) => {
   const requestRef = useRef<number>();
   const startTimeRef = useRef<number>(Date.now());
 
+  // Expose the canvas ref to parent via forwardRef
+  useImperativeHandle(ref, () => canvasRef.current!);
+
   // Initialize Three.js
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || !canvasRef.current) return;
 
     const width = containerRef.current.clientWidth;
     const height = containerRef.current.clientHeight;
@@ -28,19 +32,19 @@ const Visualizer: React.FC<VisualizerProps> = ({ audioData, isPlaying }) => {
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    // Camera setup (Orthographic for 2D Shader)
+    // Camera setup
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     cameraRef.current = camera;
 
-    // Renderer setup
+    // Renderer setup using existing canvas
     const renderer = new THREE.WebGLRenderer({ 
+      canvas: canvasRef.current,
       antialias: false, 
       powerPreference: "high-performance",
-      preserveDrawingBuffer: true 
+      preserveDrawingBuffer: true // Required for MediaRecorder to capture the buffer
     });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     // Shader Material
@@ -78,10 +82,7 @@ const Visualizer: React.FC<VisualizerProps> = ({ audioData, isPlaying }) => {
 
     return () => {
       window.removeEventListener('resize', handleResize);
-      if (rendererRef.current && containerRef.current) {
-        containerRef.current.removeChild(rendererRef.current.domElement);
-        rendererRef.current.dispose();
-      }
+      rendererRef.current?.dispose();
     };
   }, []);
 
@@ -92,11 +93,8 @@ const Visualizer: React.FC<VisualizerProps> = ({ audioData, isPlaying }) => {
 
       const currentTime = (Date.now() - startTimeRef.current) * 0.001;
       
-      // Update Uniforms
       const uniforms = materialRef.current.uniforms;
       uniforms.uTime.value = currentTime;
-      
-      // Smooth interpolation could be added here, but direct mapping feels more "glitchy"
       uniforms.uBass.value = audioData.bass / 255.0;
       uniforms.uMid.value = audioData.mid / 255.0;
       uniforms.uHigh.value = audioData.high / 255.0;
@@ -111,9 +109,13 @@ const Visualizer: React.FC<VisualizerProps> = ({ audioData, isPlaying }) => {
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [audioData]); // Dependencies allow React to keep the loop fresh with latest data ref if needed, but refs are stable.
+  }, [audioData]);
 
-  return <div ref={containerRef} className="absolute inset-0 w-full h-full z-0" />;
-};
+  return (
+    <div ref={containerRef} className="absolute inset-0 w-full h-full z-0">
+      <canvas ref={canvasRef} className="block w-full h-full" />
+    </div>
+  );
+});
 
 export default Visualizer;
