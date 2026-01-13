@@ -1,0 +1,7 @@
+{
+  "name": "BRZI ARZI // GLITCH VISUALIZER",
+  "description": "Audio-reactive abnormalism generator featuring fractal vortex shaders, glitch aesthetics, and deep bass integration.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
